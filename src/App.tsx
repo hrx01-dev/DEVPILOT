@@ -4,18 +4,41 @@ import {
   useEffect,
   useMemo,
   useState,
+  type FormEvent,
   type ReactNode,
 } from "react"
 import {
+  createUserWithEmailAndPassword,
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  signOut as signOutFirebase,
+  updateProfile,
+  type User,
+} from "firebase/auth"
+import {
+  auth as firebaseAuth,
+  firebaseConfigured,
+} from "./firebase"
+import {
   analyzeRepository,
+  fetchAccessibleRepositories,
   fetchIssues,
   fetchTextFile,
   inferRelevantFiles,
   parseGitHubUrl,
   sourceFilePaths,
   type GitHubIssue,
+  type AccessibleRepository,
   type ProjectAnalysis,
 } from "./github"
+import {
+  getAuthStatus,
+  signOutGitHub,
+  startGitHubLogin,
+  type AuthStatus,
+} from "./auth"
 import {
   explainWithGroq,
   generateTestWithGroq,
@@ -23,7 +46,7 @@ import {
   type AiStatus,
 } from "./groq"
 
-type Screen = "landing" | "connect" | "dashboard" | "explorer" | "issues" | "tests" | "guide" | "settings"
+type Screen = "landing" | "auth" | "connect" | "dashboard" | "explorer" | "issues" | "tests" | "guide" | "settings"
 
 type WorkspaceContextValue = {
   analysis: ProjectAnalysis | null
@@ -40,6 +63,63 @@ function useWorkspace() {
   const value = useContext(WorkspaceContext)
   if (!value) throw new Error("Workspace context is unavailable.")
   return value
+}
+
+function renderInlineMarkdown(text: string) {
+  return text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g).map((part, index) => {
+    if (part.startsWith("`") && part.endsWith("`")) return <code key={index}>{part.slice(1, -1)}</code>
+    if (part.startsWith("**") && part.endsWith("**")) return <strong key={index}>{part.slice(2, -2)}</strong>
+    return part
+  })
+}
+
+function MarkdownAnswer({ content }: { content: string }) {
+  const blocks: ReactNode[] = []
+  const lines = content.replace(/\r/g, "").split("\n")
+  let index = 0
+
+  while (index < lines.length) {
+    const line = lines[index]
+    if (!line.trim() || line.trim() === "---") { index += 1; continue }
+    if (line.trim().startsWith("```")) {
+      const language = line.trim().slice(3).trim()
+      const code: string[] = []
+      index += 1
+      while (index < lines.length && !lines[index].trim().startsWith("```")) code.push(lines[index++])
+      blocks.push(<div className="ai-code-block" key={`code-${index}`}>{language && <span>{language}</span>}<pre><code>{code.join("\n")}</code></pre></div>)
+      index += 1
+      continue
+    }
+    const heading = line.match(/^(#{1,4})\s+(.+)$/)
+    if (heading) {
+      const headingContent = renderInlineMarkdown(heading[2])
+      const key = `heading-${index}`
+      if (heading[1].length === 1) blocks.push(<h2 key={key}>{headingContent}</h2>)
+      else if (heading[1].length === 2) blocks.push(<h3 key={key}>{headingContent}</h3>)
+      else if (heading[1].length === 3) blocks.push(<h4 key={key}>{headingContent}</h4>)
+      else blocks.push(<h5 key={key}>{headingContent}</h5>)
+      index += 1
+      continue
+    }
+    const listMatch = line.match(/^\s*(\d+\.|[-*])\s+(.+)$/)
+    if (listMatch) {
+      const ordered = /\d+\./.test(listMatch[1])
+      const items: string[] = []
+      while (index < lines.length) {
+        const item = lines[index].match(/^\s*(\d+\.|[-*])\s+(.+)$/)
+        if (!item || /\d+\./.test(item[1]) !== ordered) break
+        items.push(item[2]); index += 1
+      }
+      const children = items.map((item, itemIndex) => <li key={itemIndex}>{renderInlineMarkdown(item)}</li>)
+      blocks.push(ordered ? <ol key={`list-${index}`}>{children}</ol> : <ul key={`list-${index}`}>{children}</ul>)
+      continue
+    }
+    const paragraph = [line.trim()]
+    index += 1
+    while (index < lines.length && lines[index].trim() && !/^(#{1,4})\s+|^\s*(\d+\.|[-*])\s+|^```|^---$/.test(lines[index])) paragraph.push(lines[index++].trim())
+    blocks.push(<p key={`paragraph-${index}`}>{renderInlineMarkdown(paragraph.join(" "))}</p>)
+  }
+  return <div className="ai-generated-answer">{blocks}</div>
 }
 
 type IconName = "arrow" | "branch" | "check" | "chevron" | "code" | "command" | "dashboard" | "file" | "folder" | "github" | "guide" | "issue" | "layers" | "menu" | "play" | "plus" | "repo" | "search" | "settings" | "spark" | "test" | "x"
@@ -241,7 +321,7 @@ function Landing({ go }: { go: (s: Screen) => void }) {
           <button onClick={() => scrollTo("features")}>Features</button>
         </div>
         <div className="nav-actions">
-          <Badge tone="green">PUBLIC GITHUB</Badge>
+          <Button kind="tertiary" onClick={() => go("auth")}>Sign in</Button>
           <Button onClick={() => go("connect")}>Get Started</Button>
         </div>
       </nav>
@@ -442,15 +522,15 @@ function Auth({ go }: { go: (s: Screen) => void }) {
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!auth) return;
+    if (!firebaseAuth) return;
     setBusy(true);
     setError("");
     try {
       if (mode === "signup") {
-        const credential = await createUserWithEmailAndPassword(auth, email, password);
+        const credential = await createUserWithEmailAndPassword(firebaseAuth, email, password);
         if (name.trim()) await updateProfile(credential.user, { displayName: name.trim() });
       } else {
-        await signInWithEmailAndPassword(auth, email, password);
+        await signInWithEmailAndPassword(firebaseAuth, email, password);
       }
     } catch (reason) {
       showAuthError(reason);
@@ -460,24 +540,11 @@ function Auth({ go }: { go: (s: Screen) => void }) {
   };
 
   const signInWithGoogle = async () => {
-    if (!auth) return;
+    if (!firebaseAuth) return;
     setBusy(true);
     setError("");
     try {
-      await signInWithPopup(auth, new GoogleAuthProvider());
-    } catch (reason) {
-      showAuthError(reason);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const signInWithGitHub = async () => {
-    if (!auth) return;
-    setBusy(true);
-    setError("");
-    try {
-      await signInWithPopup(auth, new GithubAuthProvider());
+      await signInWithPopup(firebaseAuth, new GoogleAuthProvider());
     } catch (reason) {
       showAuthError(reason);
     } finally {
@@ -492,7 +559,6 @@ function Auth({ go }: { go: (s: Screen) => void }) {
       <section className="auth-card">
         <div className="auth-providers">
           <button className="provider-auth" onClick={signInWithGoogle} disabled={busy || !firebaseConfigured}><span className="google-mark">G</span>Continue with Google</button>
-          <button className="provider-auth" onClick={signInWithGitHub} disabled={busy || !firebaseConfigured}><Icon name="github" size={17}/>Continue with GitHub</button>
         </div>
         <div className="auth-divider"><span>or continue with email</span></div>
         <form className="auth-form" onSubmit={submit}>
@@ -531,6 +597,16 @@ function Shell({
 }) {
   const [mobileOpen, setMobileOpen] = useState(false)
   const { analysis } = useWorkspace()
+  const [auth, setAuth] = useState<AuthStatus | null>(null)
+  useEffect(() => {
+    getAuthStatus().then(setAuth).catch(() => setAuth(null))
+  }, [])
+  const initials = (auth?.user?.name || auth?.user?.login || "GH")
+    .split(/\s+/)
+    .map((part) => part[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase()
   return (
     <div className="app-shell">
       <aside className={mobileOpen ? "sidebar open" : "sidebar"}>
@@ -575,10 +651,10 @@ function Shell({
             Settings
           </button>
           <div className="profile">
-            <span>AM</span>
+            <span>{initials}</span>
             <div>
-              <b>Alex Morgan</b>
-              <small>alex@devpilot.dev</small>
+              <b>{auth?.user?.name ?? "GitHub user"}</b>
+              <small>@{auth?.user?.login ?? "authenticated"}</small>
             </div>
             <Icon name="chevron" size={14} />
           </div>
@@ -603,7 +679,7 @@ function Shell({
             <button className="icon-button" onClick={() => go("explorer")}>
               <Icon name="command" />
             </button>
-            <span className="avatar">AM</span>
+            <span className="avatar">{initials}</span>
           </div>
         </header>
         {children}
@@ -614,6 +690,9 @@ function Shell({
 
 function Connect({ go }: { go: (s: Screen) => void }) {
   const { analysis, setAnalysis, setIssues } = useWorkspace()
+  const [auth, setAuth] = useState<AuthStatus | null>(null)
+  const [repositories, setRepositories] = useState<AccessibleRepository[]>([])
+  const [authError, setAuthError] = useState("")
   const [stage, setStage] = useState<"form" | "analyzing" | "done" | "error">(
     analysis ? "done" : "form",
   )
@@ -623,8 +702,24 @@ function Connect({ go }: { go: (s: Screen) => void }) {
   const [error, setError] = useState("")
   const [progress, setProgress] = useState(0)
   const validRepo = parseGitHubUrl(repoUrl) !== null
+  useEffect(() => {
+    getAuthStatus()
+      .then(async (status) => {
+        setAuth(status)
+        if (status.authenticated) {
+          setRepositories(await fetchAccessibleRepositories())
+        }
+      })
+      .catch((reason) =>
+        setAuthError(
+          reason instanceof Error
+            ? reason.message
+            : "Unable to check GitHub authentication.",
+        ),
+      )
+  }, [])
   const connect = async () => {
-    if (!validRepo) return
+    if (!validRepo || !auth?.authenticated) return
     setStage("analyzing")
     setError("")
     setProgress(1)
@@ -669,16 +764,100 @@ function Connect({ go }: { go: (s: Screen) => void }) {
           <i />
           <span className={stage === "done" ? "on" : ""}>3</span>
         </div>
-        {stage === "form" ? (
+        {!auth?.authenticated ? (
+          <div className="connect-card auth-gate">
+            <span className="auth-mark">
+              <Icon name="github" size={28} />
+            </span>
+            <Badge tone="purple">ACCOUNT REQUIRED</Badge>
+            <h1>Sign in with GitHub to continue</h1>
+            <p>
+              Repository analysis is available only to authenticated users.
+              GitHub authorization lets DevPilot read repositories you can
+              access and uses your authenticated API allowance instead of the
+              anonymous rate limit.
+            </p>
+            <div className="permission-list">
+              <div>
+                <Icon name="check" size={15} />
+                <span>
+                  <b>Read your GitHub profile</b>
+                  <small>Used as your DevPilot account identity</small>
+                </span>
+              </div>
+              <div>
+                <Icon name="check" size={15} />
+                <span>
+                  <b>Read repositories you authorize</b>
+                  <small>Required for source, issues, and private repositories</small>
+                </span>
+              </div>
+              <div>
+                <Icon name="check" size={15} />
+                <span>
+                  <b>Server-side token storage</b>
+                  <small>The access token is never exposed to browser code</small>
+                </span>
+              </div>
+            </div>
+            {authError && <div className="inline-error">{authError}</div>}
+            {!auth && !authError ? (
+              <div className="auth-checking">
+                <i className="spinner" /> Checking authentication…
+              </div>
+            ) : (
+              <Button
+                onClick={startGitHubLogin}
+                disabled={!auth?.configured}
+                icon="github"
+              >
+                Continue with GitHub
+              </Button>
+            )}
+            {auth && !auth.configured && (
+              <p className="auth-config-note">
+                The server administrator must configure GITHUB_CLIENT_ID and
+                GITHUB_CLIENT_SECRET before sign-in can begin.
+              </p>
+            )}
+            <small className="auth-footnote">
+              GitHub will show the requested permissions before you approve
+              access. You can revoke access from GitHub settings at any time.
+            </small>
+          </div>
+        ) : stage === "form" ? (
           <div className="connect-card">
             <Badge tone="purple">
-              <Icon name="repo" size={12} /> CONNECT A PUBLIC REPOSITORY
+              <Icon name="repo" size={12} /> AUTHORIZED REPOSITORY ACCESS
             </Badge>
-            <h1>Analyze a real GitHub repository</h1>
+            <h1>Choose a repository to analyze</h1>
             <p>
-              DevPilot reads public GitHub metadata and source files directly.
-              Nothing is written to the repository.
+              Signed in as <b>@{auth.user?.login}</b>. DevPilot makes
+              authenticated, read-only GitHub requests through the server.
             </p>
+            {repositories.length > 0 && (
+              <div className="authorized-repos">
+                <label>Your recently updated repositories</label>
+                <div>
+                  {repositories.slice(0, 6).map((repo) => (
+                    <button
+                      key={repo.fullName}
+                      className={repoUrl === repo.htmlUrl ? "active" : ""}
+                      onClick={() => setRepoUrl(repo.htmlUrl)}
+                    >
+                      <Icon name={repo.private ? "repo" : "github"} size={15} />
+                      <span>
+                        <b>{repo.fullName}</b>
+                        <small>{repo.description}</small>
+                      </span>
+                      <Badge tone={repo.private ? "amber" : "green"}>
+                        {repo.private ? "PRIVATE" : "PUBLIC"}
+                      </Badge>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <label>Repository URL</label>
             <div className={`field ${repoUrl && !validRepo ? "invalid" : ""}`}>
               <Icon name="github" />
@@ -694,7 +873,7 @@ function Connect({ go }: { go: (s: Screen) => void }) {
             </div>
             {repoUrl && !validRepo && (
               <p className="field-error">
-                Enter a public GitHub repository URL.
+                Enter a GitHub repository URL available to your account.
               </p>
             )}
             <div
@@ -711,12 +890,12 @@ function Connect({ go }: { go: (s: Screen) => void }) {
                 </b>
                 <p>
                   {validRepo
-                    ? "GitHub API and raw source access will be used"
+                    ? "Authenticated GitHub access will be used"
                     : "Waiting for a valid repository URL"}
                 </p>
                 <div>
                   <Badge tone="green">Live data</Badge>
-                  <span>Public repositories</span>
+                  <span>Public and authorized private repositories</span>
                 </div>
               </div>
               {validRepo && <Icon name="check" />}
@@ -724,16 +903,13 @@ function Connect({ go }: { go: (s: Screen) => void }) {
             <Button disabled={!validRepo} onClick={connect} icon="arrow">
               Analyze Repository
             </Button>
-            <div className="permission">
+            <div className="permission authenticated-permission">
               <Icon name="github" />
               <div>
-                <b>Private repository access</b>
-                <p>
-                  OAuth-based private access is intentionally deferred as
-                  requested.
-                </p>
+                <b>Authenticated as @{auth.user?.login}</b>
+                <p>API requests use your GitHub session and higher rate limit.</p>
               </div>
-              <Badge tone="neutral">LATER</Badge>
+              <Badge tone="green">CONNECTED</Badge>
             </div>
           </div>
         ) : (
@@ -1989,7 +2165,13 @@ function LiveExplorer({ go }: { go: (s: Screen) => void }) {
         repository: analysis.repo.fullName,
         branch: analysis.repo.defaultBranch,
         file: selected,
-        source: content.slice(0, 30_000),
+        // Keep the full request comfortably below Groq's free-tier 8K TPM cap,
+        // leaving room for the prompt and generated answer.
+        source: content.slice(0, 14_000),
+        sourceNotice:
+          content.length > 14_000
+            ? `This is the first 14,000 characters of ${content.length.toLocaleString()} total characters.`
+            : "Complete file supplied.",
         detectedImports: imports,
         relatedTests: analysis.testFiles.filter((path) =>
           path
@@ -2371,7 +2553,7 @@ function LiveExplorer({ go }: { go: (s: Screen) => void }) {
                 </div>
               </div>
               {aiAnswer ? (
-                <div className="ai-generated-answer">{aiAnswer}</div>
+                <MarkdownAnswer content={aiAnswer} />
               ) : (
                 <p>{explanation}</p>
               )}
@@ -3210,7 +3392,7 @@ function RealTestLab({ go }: { go: (s: Screen) => void }) {
         expectedBehavior: expected,
         reportedBehavior: actual,
         targetFile: target,
-        targetSource: targetSource.slice(0, 28_000),
+        targetSource: targetSource.slice(0, 14_000),
         existingTests: analysis.testFiles.slice(0, 12),
       })
       setGeneratedCode(result.content)
@@ -3648,16 +3830,23 @@ function Settings() {
 function LiveSettings({ go }: { go: (s: Screen) => void }) {
   const { analysis, setAnalysis, setIssues, setSelectedIssue } = useWorkspace()
   const [aiStatus, setAiStatus] = useState<AiStatus | null>(null)
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null)
   useEffect(() => {
     getAiStatus()
       .then(setAiStatus)
       .catch(() => setAiStatus({ configured: false, model: "Unavailable" }))
+    getAuthStatus().then(setAuthStatus).catch(() => setAuthStatus(null))
   }, [])
   const disconnect = () => {
     setAnalysis(null)
     setIssues([])
     setSelectedIssue(null)
     go("connect")
+  }
+  const logout = async () => {
+    await signOutGitHub()
+    if (firebaseAuth) await signOutFirebase(firebaseAuth)
+    disconnect()
   }
   return (
     <div className="page settings-page">
@@ -3682,15 +3871,26 @@ function LiveSettings({ go }: { go: (s: Screen) => void }) {
           <section className="panel">
             <div className="setting-row">
               <div>
-                <h2>Public GitHub access</h2>
+                <h2>GitHub account</h2>
                 <p>
-                  Anonymous, read-only requests to GitHub REST and raw content
-                  APIs.
+                  {authStatus?.authenticated
+                    ? `Signed in as @${authStatus.user?.login}`
+                    : "No authenticated GitHub session."}
                 </p>
               </div>
-              <Badge tone="green">ACTIVE</Badge>
+              <Badge tone={authStatus?.authenticated ? "green" : "amber"}>
+                {authStatus?.authenticated ? "AUTHENTICATED" : "SIGNED OUT"}
+              </Badge>
             </div>
-            <p>No GitHub token is stored. Anonymous API rate limits apply.</p>
+            <p>
+              Access tokens stay in an HTTP-only server session and are never
+              exposed to application JavaScript.
+            </p>
+            {authStatus?.authenticated && (
+              <Button kind="secondary" onClick={logout}>
+                Sign out of GitHub
+              </Button>
+            )}
           </section>
           <section className="panel">
             <div className="setting-row">
@@ -4233,14 +4433,38 @@ function LiveContributionGuide() {
 }
 
 export default function App() {
-  const [screen, setScreen] = useState<Screen>("landing")
+  const [screen, setScreen] = useState<Screen>(() =>
+    new URLSearchParams(window.location.search).has("github")
+      ? "connect"
+      : "landing",
+  )
   const [analysis, setAnalysis] = useState<ProjectAnalysis | null>(null)
   const [issues, setIssues] = useState<GitHubIssue[]>([])
   const [selectedIssue, setSelectedIssue] = useState<GitHubIssue | null>(null)
+  const [firebaseUser, setFirebaseUser] = useState<User | null>(null)
+  const [accountLoading, setAccountLoading] = useState(true)
   const go = (s: Screen) => {
-    setScreen(s)
+    setScreen(
+      s !== "landing" && s !== "auth" && !firebaseUser ? "auth" : s,
+    )
     window.scrollTo({ top: 0, behavior: "smooth" })
   }
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).has("github")) {
+      window.history.replaceState({}, "", window.location.pathname)
+    }
+  }, [])
+  useEffect(() => {
+    if (!firebaseAuth) {
+      setAccountLoading(false)
+      return
+    }
+    return onAuthStateChanged(firebaseAuth, (user) => {
+      setFirebaseUser(user)
+      setAccountLoading(false)
+      if (user && screen === "auth") setScreen("connect")
+    })
+  }, [screen])
   const workspace = useMemo(
     () => ({
       analysis,
@@ -4253,7 +4477,9 @@ export default function App() {
     [analysis, issues, selectedIssue],
   )
   let content: ReactNode
-  if (screen === "landing") content = <Landing go={go} />
+  if (accountLoading) content = <div className="app-loading"><i className="spinner"/>Loading account…</div>
+  else if (screen === "landing") content = <Landing go={go} />
+  else if (screen === "auth" || !firebaseUser) content = <Auth go={go} />
   else if (screen === "connect" || !analysis) content = <Connect go={go} />
   else
     content = (

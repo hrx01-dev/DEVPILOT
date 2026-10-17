@@ -1,16 +1,19 @@
-import { defineConfig, type HtmlTagDescriptor, type Plugin } from "vite"
+import { defineConfig, loadEnv, type HtmlTagDescriptor, type Plugin } from "vite"
 
 import react from "@vitejs/plugin-react"
 
 import tailwindcss from "@tailwindcss/vite"
 
 import path from "node:path"
+import { randomBytes } from "node:crypto"
 
 import siteConfiguration from "./.figma/make/site.json" with { type: "json" }
 
 // Vite config — https://vitejs.dev/config/
 
 export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), "")
+  Object.assign(process.env, env)
   // .figma/make/deploy-preview passes `--mode development` for cached-preview builds.
 
   const emitSourcemaps = mode === "development"
@@ -29,6 +32,7 @@ export default defineConfig(({ mode }) => {
     plugins: [
       react(),
       tailwindcss(),
+      githubAuthPlugin(),
       groqApiPlugin(),
       figmaSiteConfiguration(siteConfiguration),
       figmaErrorOverlayReplay(),
@@ -63,6 +67,248 @@ export default defineConfig(({ mode }) => {
     },
   }
 })
+
+type GitHubSession = {
+  accessToken: string
+  user: { login: string; name: string; avatarUrl: string }
+}
+
+function githubAuthPlugin(): Plugin {
+  const sessions = new Map<string, GitHubSession>()
+  const pendingStates = new Map<string, { returnTo: string; createdAt: number }>()
+  const getClientId = () => process.env.GITHUB_CLIENT_ID || ""
+  const getClientSecret = () => process.env.GITHUB_CLIENT_SECRET || ""
+  const isConfigured = () => Boolean(getClientId() && getClientSecret())
+  const parseCookies = (header: string | undefined) =>
+    Object.fromEntries(
+      (header || "")
+        .split(";")
+        .map((part) => part.trim().split("=").map(decodeURIComponent))
+        .filter((pair) => pair.length === 2),
+    )
+  const sendJson = (res: any, status: number, value: unknown) => {
+    res.statusCode = status
+    res.setHeader("Content-Type", "application/json; charset=utf-8")
+    res.end(JSON.stringify(value))
+  }
+  const sessionFor = (req: any) =>
+    sessions.get(parseCookies(req.headers.cookie).devpilot_session || "")
+  const safeReturnTo = (value: string | null) =>
+    value && value.startsWith("/") && !value.startsWith("//")
+      ? value
+      : "/?github=connected"
+
+  const install = (middlewares: {
+    use: (
+      handler: (req: any, res: any, next: () => void) => void,
+    ) => void
+  }) => {
+    middlewares.use(async (req, res, next) => {
+      const requestUrl = new URL(
+        req.url || "/",
+        `http://${req.headers.host || "localhost"}`,
+      )
+      const pathname = requestUrl.pathname
+      if (
+        !pathname.startsWith("/api/auth/") &&
+        !pathname.startsWith("/api/github/")
+      )
+        return next()
+
+      try {
+        if (pathname === "/api/auth/status" && req.method === "GET") {
+          const session = sessionFor(req)
+          sendJson(res, 200, {
+            configured: isConfigured(),
+            authenticated: Boolean(session),
+            user: session?.user || null,
+          })
+          return
+        }
+        if (pathname === "/api/auth/github" && req.method === "GET") {
+          if (!isConfigured()) {
+            sendJson(res, 503, {
+              error:
+                "GitHub OAuth is not configured. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET.",
+            })
+            return
+          }
+          const state = randomBytes(24).toString("hex")
+          pendingStates.set(state, {
+            returnTo: safeReturnTo(requestUrl.searchParams.get("returnTo")),
+            createdAt: Date.now(),
+          })
+          const origin = `${req.headers["x-forwarded-proto"] || "http"}://${req.headers["x-forwarded-host"] || req.headers.host}`
+          const authorize = new URL("https://github.com/login/oauth/authorize")
+          authorize.searchParams.set("client_id", getClientId())
+          const callbackUrl =
+            process.env.GITHUB_CALLBACK_URL || `${origin}/api/auth/callback`
+          authorize.searchParams.set("redirect_uri", callbackUrl)
+          authorize.searchParams.set("scope", "read:user repo")
+          authorize.searchParams.set("state", state)
+          res.statusCode = 302
+          res.setHeader("Location", authorize.toString())
+          res.end()
+          return
+        }
+        if (pathname === "/api/auth/callback" && req.method === "GET") {
+          const code = requestUrl.searchParams.get("code")
+          const state = requestUrl.searchParams.get("state") || ""
+          const pending = pendingStates.get(state)
+          pendingStates.delete(state)
+          if (
+            !code ||
+            !pending ||
+            Date.now() - pending.createdAt > 10 * 60_000
+          ) {
+            res.statusCode = 302
+            res.setHeader("Location", "/?github=error")
+            res.end()
+            return
+          }
+          const tokenResponse = await fetch(
+            "https://github.com/login/oauth/access_token",
+            {
+              method: "POST",
+              headers: {
+                Accept: "application/json",
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                client_id: getClientId(),
+                client_secret: getClientSecret(),
+                code,
+              }),
+            },
+          )
+          const tokenData = (await tokenResponse.json()) as any
+          if (!tokenResponse.ok || !tokenData.access_token)
+            throw new Error(
+              tokenData.error_description || "GitHub authorization failed.",
+            )
+          const userResponse = await fetch("https://api.github.com/user", {
+            headers: {
+              Authorization: `Bearer ${tokenData.access_token}`,
+              Accept: "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "User-Agent": "DevPilot",
+            },
+          })
+          if (!userResponse.ok)
+            throw new Error("Unable to load the authorized GitHub user.")
+          const user = (await userResponse.json()) as any
+          const sessionId = randomBytes(32).toString("hex")
+          sessions.set(sessionId, {
+            accessToken: tokenData.access_token,
+            user: {
+              login: user.login,
+              name: user.name || user.login,
+              avatarUrl: user.avatar_url,
+            },
+          })
+          const secure = req.headers["x-forwarded-proto"] === "https"
+          res.setHeader(
+            "Set-Cookie",
+            `devpilot_session=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800${secure ? "; Secure" : ""}`,
+          )
+          res.statusCode = 302
+          res.setHeader("Location", pending.returnTo)
+          res.end()
+          return
+        }
+        if (pathname === "/api/auth/logout" && req.method === "POST") {
+          const id = parseCookies(req.headers.cookie).devpilot_session || ""
+          sessions.delete(id)
+          res.setHeader(
+            "Set-Cookie",
+            "devpilot_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+          )
+          sendJson(res, 200, { authenticated: false })
+          return
+        }
+
+        const session = sessionFor(req)
+        if (!session) {
+          sendJson(res, 401, {
+            error: "Sign in with GitHub before accessing repositories.",
+          })
+          return
+        }
+        const githubHeaders: Record<string, string> = {
+          Authorization: `Bearer ${session.accessToken}`,
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+          "User-Agent": "DevPilot",
+        }
+        let target = ""
+        if (pathname === "/api/github/rest") {
+          const apiPath = requestUrl.searchParams.get("path") || ""
+          if (!apiPath.startsWith("/") || apiPath.includes("://")) {
+            sendJson(res, 400, { error: "Invalid GitHub API path." })
+            return
+          }
+          target = `https://api.github.com${apiPath}`
+        } else if (pathname === "/api/github/file") {
+          const owner = requestUrl.searchParams.get("owner") || ""
+          const repo = requestUrl.searchParams.get("repo") || ""
+          const branch = requestUrl.searchParams.get("branch") || ""
+          const filePath = requestUrl.searchParams.get("path") || ""
+          if (
+            ![owner, repo, branch, filePath].every(Boolean) ||
+            !/^[\w.-]+$/.test(owner) ||
+            !/^[\w.-]+$/.test(repo)
+          ) {
+            sendJson(res, 400, { error: "Invalid repository file request." })
+            return
+          }
+          target = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${filePath
+            .split("/")
+            .map(encodeURIComponent)
+            .join("/")}?ref=${encodeURIComponent(branch)}`
+          githubHeaders.Accept = "application/vnd.github.raw+json"
+        } else {
+          sendJson(res, 404, { error: "GitHub proxy route not found." })
+          return
+        }
+        const upstream = await fetch(target, { headers: githubHeaders })
+        const body = Buffer.from(await upstream.arrayBuffer())
+        res.statusCode = upstream.status
+        res.setHeader(
+          "Content-Type",
+          upstream.headers.get("content-type") ||
+            "application/json; charset=utf-8",
+        )
+        for (const header of [
+          "x-ratelimit-limit",
+          "x-ratelimit-remaining",
+          "x-ratelimit-reset",
+          "retry-after",
+        ]) {
+          const value = upstream.headers.get(header)
+          if (value) res.setHeader(header, value)
+        }
+        res.end(body)
+      } catch (error) {
+        sendJson(res, 500, {
+          error:
+            error instanceof Error
+              ? error.message
+              : "GitHub authentication failed.",
+        })
+      }
+    })
+  }
+
+  return {
+    name: "devpilot-github-auth",
+    configureServer(server) {
+      install(server.middlewares)
+    },
+    configurePreviewServer(server) {
+      install(server.middlewares)
+    },
+  }
+}
 
 function groqApiPlugin(): Plugin {
   const route = "/api/ai"
@@ -131,7 +377,9 @@ function groqApiPlugin(): Plugin {
             body: JSON.stringify({
               model,
               temperature: 0.2,
-              max_completion_tokens: 1800,
+              // The configured model's free tier permits 8K tokens/minute.
+              // Reserve enough headroom for source context and system text.
+              max_completion_tokens: 1200,
               messages: [
                 { role: "system", content: system },
                 {
@@ -148,8 +396,10 @@ function groqApiPlugin(): Plugin {
           res.end(
             JSON.stringify({
               error:
-                data?.error?.message ||
-                `Groq request failed (${response.status}).`,
+                response.status === 429
+                  ? "Groq's current rate limit was reached. Wait a minute and try again; DevPilot now sends a smaller source excerpt to stay within the free-tier limit."
+                  : data?.error?.message ||
+                    `Groq request failed (${response.status}).`,
             }),
           )
           return
