@@ -1,7 +1,20 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import {
+  createUserWithEmailAndPassword,
+  GithubAuthProvider,
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  signOut,
+  updateProfile,
+  type User,
+} from "firebase/auth";
+import { auth, firebaseConfigured } from "./firebase";
 
 type Screen =
   | "landing"
+  | "auth"
   | "connect"
   | "dashboard"
   | "explorer"
@@ -24,6 +37,7 @@ type IconName =
   | "guide"
   | "issue"
   | "layers"
+  | "logout"
   | "menu"
   | "play"
   | "plus"
@@ -48,6 +62,7 @@ const paths: Record<IconName, ReactNode> = {
   guide: <><path d="M5 4h14v16H5z" /><path d="M8 8h8M8 12h8M8 16h5" /></>,
   issue: <><circle cx="12" cy="12" r="9" /><path d="M12 7v6M12 17h.01" /></>,
   layers: <><path d="m12 3 9 5-9 5-9-5z" /><path d="m3 12 9 5 9-5M3 16l9 5 9-5" /></>,
+  logout: <><path d="M10 17l5-5-5-5M15 12H3" /><path d="M12 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-6" /></>,
   menu: <path d="M4 7h16M4 12h16M4 17h16" />,
   play: <path d="m8 5 11 7-11 7z" />,
   plus: <path d="M12 5v14M5 12h14" />,
@@ -80,7 +95,7 @@ function Landing({ go }: { go: (s: Screen) => void }) {
     <nav className="marketing-nav">
       <Logo onClick={() => go("landing")} />
       <div className="nav-links"><button>Product</button><button>How it works</button><button>Features</button></div>
-      <div className="nav-actions"><Button kind="tertiary">Sign in</Button><Button onClick={() => go("connect")}>Get Started</Button></div>
+      <div className="nav-actions"><Button kind="tertiary" onClick={() => go("auth")}>Sign in</Button><Button onClick={() => go("connect")}>Get Started</Button></div>
     </nav>
     <section className="hero">
       <Badge tone="purple">YOUR FIRST CONTRIBUTION STARTS HERE</Badge>
@@ -114,23 +129,119 @@ function Landing({ go }: { go: (s: Screen) => void }) {
   </main>;
 }
 
+function Auth({ go }: { go: (s: Screen) => void }) {
+  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const showAuthError = (reason: unknown) => {
+    const code = typeof reason === "object" && reason !== null && "code" in reason
+      ? String(reason.code)
+      : "";
+    const messages: Record<string, string> = {
+      "auth/invalid-credential": "That email and password combination was not recognized.",
+      "auth/email-already-in-use": "An account already exists for this email. Sign in instead.",
+      "auth/weak-password": "Choose a password with at least 6 characters.",
+      "auth/invalid-email": "Enter a valid email address.",
+      "auth/popup-closed-by-user": "The provider sign-in window was closed before it finished.",
+      "auth/popup-blocked": "Your browser blocked the sign-in window. Allow popups and try again.",
+      "auth/operation-not-allowed": "This sign-in method is not enabled in the Firebase Console.",
+    };
+    setError(messages[code] ?? "We couldn't complete sign-in. Check your details and try again.");
+  };
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!auth) return;
+    setBusy(true);
+    setError("");
+    try {
+      if (mode === "signup") {
+        const credential = await createUserWithEmailAndPassword(auth, email, password);
+        if (name.trim()) await updateProfile(credential.user, { displayName: name.trim() });
+      } else {
+        await signInWithEmailAndPassword(auth, email, password);
+      }
+    } catch (reason) {
+      showAuthError(reason);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const signInWithGoogle = async () => {
+    if (!auth) return;
+    setBusy(true);
+    setError("");
+    try {
+      await signInWithPopup(auth, new GoogleAuthProvider());
+    } catch (reason) {
+      showAuthError(reason);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const signInWithGitHub = async () => {
+    if (!auth) return;
+    setBusy(true);
+    setError("");
+    try {
+      await signInWithPopup(auth, new GithubAuthProvider());
+    } catch (reason) {
+      showAuthError(reason);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return <div className="auth-page">
+    <header><Logo onClick={() => go("landing")} /><button onClick={() => go("landing")}>Back to DevPilot</button></header>
+    <main>
+      <div className="auth-heading"><Badge tone="purple">YOUR DEVPILOT WORKSPACE</Badge><h1>{mode === "signup" ? "Create your account" : "Welcome back"}</h1><p>{mode === "signup" ? "Create an account to start exploring repositories." : "Sign in to continue to your workspace."}</p></div>
+      <section className="auth-card">
+        <div className="auth-providers">
+          <button className="provider-auth" onClick={signInWithGoogle} disabled={busy || !firebaseConfigured}><span className="google-mark">G</span>Continue with Google</button>
+          <button className="provider-auth" onClick={signInWithGitHub} disabled={busy || !firebaseConfigured}><Icon name="github" size={17}/>Continue with GitHub</button>
+        </div>
+        <div className="auth-divider"><span>or continue with email</span></div>
+        <form className="auth-form" onSubmit={submit}>
+          {mode === "signup" && <label>Name<input autoComplete="name" value={name} onChange={event => setName(event.target.value)} required /></label>}
+          <label>Email address<input type="email" autoComplete="email" value={email} onChange={event => setEmail(event.target.value)} required /></label>
+          <label>Password<input type="password" autoComplete={mode === "signup" ? "new-password" : "current-password"} minLength={6} value={password} onChange={event => setPassword(event.target.value)} required /></label>
+          {error && <p className="auth-error" role="alert">{error}</p>}
+          {!firebaseConfigured && <p className="auth-config-note">Firebase isn't configured yet. Add the web app values from your Firebase project to `.env.local`, then restart the dev server.</p>}
+          <button className="button primary auth-submit" type="submit" disabled={busy || !firebaseConfigured}>{busy ? "Please wait…" : mode === "signup" ? "Create account" : "Sign in"}</button>
+        </form>
+        <p className="auth-switch">{mode === "signup" ? "Already have an account?" : "New to DevPilot?"} <button onClick={() => { setMode(mode === "signup" ? "signin" : "signup"); setError(""); }}>{mode === "signup" ? "Sign in" : "Create an account"}</button></p>
+      </section>
+      <button className="auth-back" onClick={() => go("landing")}>Return to the homepage</button>
+    </main>
+  </div>;
+}
+
 const navItems: [Screen, IconName, string][] = [
   ["dashboard","dashboard","Overview"], ["dashboard","repo","My Repositories"], ["explorer","code","Codebase Explorer"],
   ["issues","issue","Issues & Tasks"], ["tests","test","Test Lab"], ["guide","guide","Contribution Guide"],
 ];
 
-function Shell({ screen, go, children }: { screen: Screen; go: (s: Screen) => void; children: ReactNode }) {
+function Shell({ screen, go, user, onSignOut, children }: { screen: Screen; go: (s: Screen) => void; user: User; onSignOut: () => void; children: ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const accountName = user.displayName || user.email?.split("@")[0] || "DevPilot member";
+  const initials = accountName.split(/\s+/).map(part => part[0]).join("").slice(0, 2).toUpperCase();
   return <div className="app-shell">
     <aside className={mobileOpen ? "sidebar open" : "sidebar"}>
       <div className="side-head"><Logo onClick={() => go("landing")}/><button className="mobile-close" onClick={()=>setMobileOpen(false)}><Icon name="x"/></button></div>
       <Button onClick={() => go("connect")} kind="secondary" icon="plus">Add repository</Button>
       <div className="nav-label">WORKSPACE</div>
       <nav className="side-nav">{navItems.map(([id,icon,label],i)=><button key={`${label}-${i}`} className={screen===id && (id!=="dashboard" || i===0) ? "active":""} onClick={()=>{go(id);setMobileOpen(false)}}><Icon name={icon}/>{label}{label==="Issues & Tasks"&&<span>3</span>}</button>)}</nav>
-      <div className="side-bottom"><button><Icon name="guide"/>Documentation</button><button onClick={()=>go("settings")} className={screen==="settings"?"active":""}><Icon name="settings"/>Settings</button><div className="profile"><span>AM</span><div><b>Alex Morgan</b><small>alex@devpilot.dev</small></div><Icon name="chevron" size={14}/></div></div>
+      <div className="side-bottom"><button><Icon name="guide"/>Documentation</button><button onClick={()=>go("settings")} className={screen==="settings"?"active":""}><Icon name="settings"/>Settings</button><div className="profile"><span>{initials}</span><div><b>{accountName}</b><small>{user.email}</small></div><button className="profile-signout" onClick={onSignOut} aria-label="Sign out" title="Sign out"><Icon name="logout" size={16}/></button></div></div>
     </aside>
     <section className="workspace">
-      <header className="topbar"><button className="mobile-menu" onClick={()=>setMobileOpen(true)}><Icon name="menu"/></button><div className="repo-switcher"><Icon name="repo"/><b>opensource-labs/compass</b><Icon name="chevron" size={13}/></div><div className="top-actions"><button className="global-search"><Icon name="search" size={15}/><span>Search anything</span><kbd>⌘ K</kbd></button><button className="icon-button"><Icon name="command"/></button><span className="avatar">AM</span></div></header>
+      <header className="topbar"><button className="mobile-menu" onClick={()=>setMobileOpen(true)}><Icon name="menu"/></button><div className="repo-switcher"><Icon name="repo"/><b>opensource-labs/compass</b><Icon name="chevron" size={13}/></div><div className="top-actions"><button className="global-search"><Icon name="search" size={15}/><span>Search anything</span><kbd>⌘ K</kbd></button><button className="icon-button"><Icon name="command"/></button><span className="avatar" title={accountName}>{initials}</span></div></header>
       {children}
     </section>
   </div>;
@@ -146,8 +257,8 @@ function Connect({ go }: { go: (s: Screen) => void }) {
   </main></div>;
 }
 
-function Dashboard({ go }: { go: (s: Screen) => void }) {
-  return <div className="page dashboard-page"><div className="page-title"><div><p>MONDAY, MAY 12</p><h1>Welcome back, Alex</h1><span>Pick up where you left off, or explore your next contribution.</span></div><Button onClick={()=>go("connect")} icon="plus">Add Repository</Button></div>
+function Dashboard({ go, name }: { go: (s: Screen) => void; name: string }) {
+  return <div className="page dashboard-page"><div className="page-title"><div><p>MONDAY, MAY 12</p><h1>Welcome back, {name}</h1><span>Pick up where you left off, or explore your next contribution.</span></div><Button onClick={()=>go("connect")} icon="plus">Add Repository</Button></div>
     <div className="dashboard-grid"><section className="panel recent"><div className="panel-head"><div><h2>Recently analyzed</h2><p>Your active repositories</p></div><button>View all</button></div><article className="repo-card" onClick={()=>go("explorer")}><div className="repo-card-top"><span className="repo-avatar">C</span><div><h3>opensource-labs/compass</h3><p>Developer-first API toolkit</p></div><Icon name="arrow"/></div><div className="repo-meta"><span><i className="lang-dot"/>TypeScript</span><Badge tone="green">Analysis complete</Badge><span>12 min ago</span></div><div className="progress-label"><span>Contribution progress</span><b>62%</b></div><div className="progress"><i style={{width:"62%"}}/></div><div className="repo-next"><Icon name="issue"/><span><b>Next: Investigate issue #184</b><small>Request timeout not respected</small></span><Icon name="chevron"/></div></article></section>
     <section className="panel contribution"><div className="panel-head"><div><h2>Contribution path</h2><p>Your progress on #184</p></div><span>5 of 10</span></div>{["Understand issue","Identify relevant files","Reproduce behavior","Generate focused test","Verify test result"].map((x,i)=><div className="progress-step" key={x}><span className={i<3?"complete":i===3?"current":""}>{i<3?<Icon name="check" size={13}/>:i+1}</span><div><b>{x}</b><small>{i<3?"Completed":i===3?"Up next":"Not started"}</small></div>{i===3&&<button onClick={()=>go("tests")}>Continue</button>}</div>)}</section></div>
     <div className="dashboard-grid lower"><section className="panel"><div className="panel-head"><div><h2>Recent activity</h2><p>Changes across your workspace</p></div></div>{[["code","Viewed request.ts","2 minutes ago"],["spark","Explained retryRequest()","18 minutes ago"],["issue","Added issue #184 to contribution path","Yesterday"]].map(([ic,a,b])=><div className="activity" key={a}><span><Icon name={ic as IconName}/></span><div><b>{a}</b><small>{b}</small></div></div>)}</section><section className="panel"><div className="panel-head"><div><h2>Suggested next steps</h2><p>Based on your recent work</p></div></div><div className="suggestion"><span><Icon name="test"/></span><div><Badge tone="purple">RECOMMENDED</Badge><h3>Write a focused regression test</h3><p>You’ve found the likely timeout path. Generate a test before proposing a change.</p><Button kind="secondary" onClick={()=>go("tests")}>Open Test Lab</Button></div></div></section></div>
@@ -229,14 +340,24 @@ function Guide(){
   return <div className="page guide-page"><div className="page-title compact"><div><p>CONTRIBUTION GUIDE</p><h1>Prepare your contribution</h1><span>A guided path from verified evidence to a review-ready pull request.</span></div><Badge tone="purple">ISSUE #184</Badge></div><div className="guide-progress"><div><span>Contribution readiness</span><b>{count} of 10 steps</b></div><div><i style={{width:`${count*10}%`}}/></div></div><div className="guide-layout"><section className="panel checklist"><div className="panel-head"><div><h2>Contribution checklist</h2><p>Complete each step before opening a pull request</p></div></div>{steps.map((x,i)=><button key={x} onClick={()=>setChecks(c=>c.map((v,j)=>j===i?!v:v))} className={checks[i]?"done":i===count?"current":""}><span>{checks[i]?<Icon name="check" size={14}/>:i+1}</span><div><b>{x}</b><small>{checks[i]?(i===4?"User reviewed":"Complete"):i===5?"Test evidence ready":"Not started"}</small></div>{i===5&&!checks[i]&&<Badge tone="green">VERIFIED RESULT</Badge>}</button>)}</section><section className="guide-main"><div className="panel evidence-summary"><div className="panel-head"><div><h2>Change evidence</h2><p>Keep suggestions, reviews, and results distinct</p></div></div><div className="state-columns"><div><Badge tone="purple">AI SUGGESTION</Badge><b>Forward timeout in retry config</b><small>src/middleware/retry.ts</small></div><div><Badge tone="amber">USER REVIEWED</Badge><b>Proposed change reviewed</b><small>Reviewed by Alex</small></div><div><Badge tone="green">VERIFIED RESULT</Badge><b>Regression test passed</b><small>1 test · 1.14s</small></div></div></div><div className="panel changed-files"><div className="panel-head"><div><h2>Changed files</h2><p>2 files · +18 −2</p></div><Button kind="tertiary">Review diff</Button></div><div><Icon name="file"/><span><b>src/middleware/retry.ts</b><small>Forwards timeout to retried request</small></span><i>+2 −2</i></div><div><Icon name="file"/><span><b>tests/request.retry.test.ts</b><small>Adds timeout regression test</small></span><i>+16</i></div></div><div className="panel pr-draft"><div className="panel-head"><div><h2>Pull request draft</h2><p>Editable · generated from your verified work</p></div><Badge tone="purple">AI ASSISTED</Badge></div><label>Title</label><input defaultValue="fix: preserve request timeout after retry"/><label>Summary</label><textarea defaultValue="Preserves the user-configured timeout when retrying a failed request. This prevents retry attempts from falling back to the default timeout."/><label>Testing performed</label><textarea defaultValue="Added a focused Vitest regression test using fake timers. Verified the second request aborts after the configured 1000ms timeout."/><div className="draft-actions"><Button kind="secondary">Copy markdown</Button><Button>Create pull request draft</Button></div></div></section></div></div>
 }
 
-function Settings(){
- return <div className="page settings-page"><div className="page-title compact"><div><p>SETTINGS</p><h1>Workspace preferences</h1><span>Manage your account, explanations, and repository access.</span></div></div><div className="settings-layout"><nav><button className="active">Profile</button><button>GitHub connection</button><button>AI preferences</button><button>Repositories</button><button>Privacy & access</button></nav><main><section className="panel"><h2>User profile</h2><p>Personal details shown in your workspace.</p><div className="profile-edit"><span>AM</span><div><label>Display name</label><input defaultValue="Alex Morgan"/></div></div><label>Email address</label><input defaultValue="alex@devpilot.dev" disabled/><Button>Save changes</Button></section><section className="panel"><div className="setting-row"><div><h2>GitHub connection</h2><p>Connected as <b>alexmorgan</b> · Read-only repository access</p></div><Badge tone="green">CONNECTED</Badge></div><Button kind="secondary"><Icon name="github"/>Manage connection</Button></section><section className="panel"><h2>AI explanations</h2><p>Choose how much context DevPilot includes in explanations.</p><div className="segmented"><button>Concise</button><button className="active">Balanced</button><button>Detailed</button></div><label>Preferred languages</label><div className="tag-field"><Badge tone="purple">TypeScript ×</Badge><Badge tone="neutral">Python ×</Badge><span>Add language…</span></div></section><section className="panel danger-zone"><h2>Repository access</h2><p>Disconnect Compass and remove its indexed workspace data.</p><Button kind="danger">Disconnect repository</Button></section></main></div></div>;
+function Settings({ user }: { user: User }){
+ return <div className="page settings-page"><div className="page-title compact"><div><p>SETTINGS</p><h1>Workspace preferences</h1><span>Manage your account, explanations, and repository access.</span></div></div><div className="settings-layout"><nav><button className="active">Profile</button><button>GitHub connection</button><button>AI preferences</button><button>Repositories</button><button>Privacy & access</button></nav><main><section className="panel"><h2>User profile</h2><p>Personal details shown in your workspace.</p><div className="profile-edit"><span>{(user.displayName || user.email || "D").slice(0, 1).toUpperCase()}</span><div><label>Display name</label><input defaultValue={user.displayName || ""}/></div></div><label>Email address</label><input defaultValue={user.email || ""} disabled/><Button>Save changes</Button></section><section className="panel"><div className="setting-row"><div><h2>GitHub connection</h2><p>Connect GitHub separately to authorize repository access.</p></div><Badge tone="neutral">NOT CONNECTED</Badge></div><Button kind="secondary"><Icon name="github"/>Manage connection</Button></section><section className="panel"><h2>AI explanations</h2><p>Choose how much context DevPilot includes in explanations.</p><div className="segmented"><button>Concise</button><button className="active">Balanced</button><button>Detailed</button></div><label>Preferred languages</label><div className="tag-field"><Badge tone="purple">TypeScript ×</Badge><Badge tone="neutral">Python ×</Badge><span>Add language…</span></div></section><section className="panel danger-zone"><h2>Repository access</h2><p>Disconnect Compass and remove its indexed workspace data.</p><Button kind="danger">Disconnect repository</Button></section></main></div></div>;
 }
 
 export default function App() {
   const [screen,setScreen]=useState<Screen>("landing");
-  const go=(s:Screen)=>{setScreen(s);window.scrollTo({top:0,behavior:"smooth"})};
+  const [user,setUser]=useState<User|null>(null);
+  const pendingScreen=useRef<Screen>("dashboard");
+  useEffect(()=>auth ? onAuthStateChanged(auth,setUser) : undefined,[]);
+  useEffect(()=>{if(user&&screen==="auth")setScreen(pendingScreen.current)},[user,screen]);
+  const go=(s:Screen)=>{
+    if(s!=="landing"&&s!=="auth"&&!user){pendingScreen.current=s;s="auth"}
+    setScreen(s);window.scrollTo({top:0,behavior:"smooth"});
+  };
+  const handleSignOut=async()=>{if(auth)await signOut(auth);setScreen("landing")};
   if(screen==="landing") return <Landing go={go}/>;
+  if(screen==="auth"||!user) return <Auth go={go}/>;
   if(screen==="connect") return <Connect go={go}/>;
-  return <Shell screen={screen} go={go}>{screen==="dashboard"?<Dashboard go={go}/>:screen==="explorer"?<Explorer go={go}/>:screen==="issues"?<Issues go={go}/>:screen==="tests"?<Tests go={go}/>:screen==="guide"?<Guide/>:<Settings/>}</Shell>;
+  const accountName=user.displayName||user.email?.split("@")[0]||"there";
+  return <Shell screen={screen} go={go} user={user} onSignOut={handleSignOut}>{screen==="dashboard"?<Dashboard go={go} name={accountName}/>:screen==="explorer"?<Explorer go={go}/>:screen==="issues"?<Issues go={go}/>:screen==="tests"?<Tests go={go}/>:screen==="guide"?<Guide/>:<Settings user={user}/>}</Shell>;
 }
