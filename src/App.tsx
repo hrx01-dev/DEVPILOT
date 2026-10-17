@@ -4,8 +4,18 @@ import {
   useEffect,
   useMemo,
   useState,
+  type FormEvent,
   type ReactNode,
 } from "react"
+import {
+  createUserWithEmailAndPassword,
+  GithubAuthProvider,
+  GoogleAuthProvider,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  updateProfile,
+} from "firebase/auth"
+import { auth, firebaseConfigured } from "./firebase"
 import {
   analyzeRepository,
   fetchIssues,
@@ -659,7 +669,13 @@ function Connect({ go }: { go: (s: Screen) => void }) {
     <div className="connect-page">
       <header>
         <Logo onClick={() => go("landing")} />
-        <Badge tone="green">LIVE GITHUB DATA</Badge>
+        <div className="connect-header-actions">
+          <Badge tone="green">LIVE GITHUB DATA</Badge>
+          <button className="connect-back" onClick={() => go("landing")}>
+            <Icon name="arrow" size={15} />
+            Back to home
+          </button>
+        </div>
       </header>
       <main>
         <div className="stepper">

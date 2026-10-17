@@ -172,6 +172,10 @@ p,h1,h2,h3 { margin-top: 0; }
 .auth-form input:focus { border-color:#aab1f3; box-shadow:0 0 0 3px var(--indigo); }
 .auth-submit { width:100%; margin-top:2px; }
 .auth-submit:disabled { cursor:not-allowed; opacity:.55; }
+.connect-header-actions { display:flex; align-items:center; gap:16px; }
+.connect-back { display:flex; align-items:center; gap:6px; color:var(--accent-dark); font-size:12px; font-weight:600; }
+.connect-back svg { transform:rotate(180deg); }
+.connect-back:hover { color:var(--text); }
 .auth-error,.auth-config-note { margin:0; padding:10px 11px; border-radius:7px; font-size:11px; line-height:1.5; }
 .auth-error { color:#a84242; background:var(--red-soft); }
 .auth-config-note { color:#80601e; background:var(--amber-soft); }
