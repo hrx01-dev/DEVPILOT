@@ -49,24 +49,25 @@ export type ProjectAnalysis = {
 
 const API = "https://api.github.com"
 
-function headers(): HeadersInit {
-  return {
-    Accept: "application/vnd.github+json",
-    "X-GitHub-Api-Version": "2022-11-28",
-  }
-}
-
 async function request<T>(url: string): Promise<T> {
-  const response = await fetch(url, { headers: headers() })
+  const path = url.startsWith(API) ? url.slice(API.length) : url
+  const response = await fetch(
+    `/api/github/rest?path=${encodeURIComponent(path)}`,
+    { credentials: "same-origin" },
+  )
   if (!response.ok) {
     const rateRemaining = response.headers.get("x-ratelimit-remaining")
     if (response.status === 403 && rateRemaining === "0") {
       throw new Error(
-        "GitHub's anonymous API limit has been reached. Try again after the rate-limit window resets.",
+        "Your authenticated GitHub API allowance has been reached. Wait until the rate-limit reset before retrying.",
       )
     }
+    if (response.status === 401)
+      throw new Error("Your GitHub session has expired. Sign in again.")
     if (response.status === 404)
-      throw new Error("Repository not found or not publicly accessible.")
+      throw new Error(
+        "Repository not found or your GitHub authorization does not grant access.",
+      )
     throw new Error(`GitHub request failed (${response.status}).`)
   }
   return response.json() as Promise<T>
@@ -139,11 +140,36 @@ export async function fetchTextFile(
   branch: string,
   path: string,
 ): Promise<string> {
-  const url = `https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(branch)}/${path.split("/").map(encodeURIComponent).join("/")}`
-  const response = await fetch(url)
+  const params = new URLSearchParams({ owner, repo, branch, path })
+  const response = await fetch(`/api/github/file?${params}`, {
+    credentials: "same-origin",
+  })
   if (!response.ok)
     throw new Error(`Unable to load ${path} (${response.status}).`)
   return response.text()
+}
+
+export type AccessibleRepository = {
+  fullName: string
+  htmlUrl: string
+  private: boolean
+  description: string
+  updatedAt: string
+}
+
+export async function fetchAccessibleRepositories(): Promise<
+  AccessibleRepository[]
+> {
+  const data = await request<any[]>(
+    `${API}/user/repos?visibility=all&affiliation=owner,collaborator,organization_member&sort=updated&per_page=100`,
+  )
+  return data.map((repo) => ({
+    fullName: repo.full_name,
+    htmlUrl: repo.html_url,
+    private: Boolean(repo.private),
+    description: repo.description || "No description provided.",
+    updatedAt: repo.updated_at,
+  }))
 }
 
 async function readPackageJson(

@@ -1,12 +1,26 @@
 # DEVPILOT
 
-## Firebase Authentication
+## Authentication
 
-1. Create a Firebase project and add a Web app in Project settings.
-2. In **Authentication > Sign-in method**, enable **Email/Password**, **Google**, and **GitHub**.
-3. Create a GitHub OAuth App. Set its authorization callback URL to `https://devpilot-bf020.firebaseapp.com/__/auth/handler`, then enter its client ID and client secret in the Firebase GitHub provider settings. Keep the client secret in Firebase Console; never put it in this frontend.
-4. In **Authentication > Settings > Authorized domains**, add the domain where DevPilot will run. `localhost` is commonly already listed for local development.
-5. Copy `.env.example` to `.env.local` and fill in the Firebase web app config values from Project settings.
-6. Restart the Vite dev server after changing environment values.
+Repository analysis has two required gates:
 
-The app supports email/password account creation and sign-in, Google and GitHub popup sign-in, persisted Firebase sessions, and sign-out. Firebase web config values are public client configuration; do not put service-account credentials or private keys in the frontend.
+1. A DevPilot account through Firebase Email/Password or Google authentication.
+2. A separate GitHub authorization that grants repository access to the server.
+
+Configure Firebase with `VITE_FIREBASE_API_KEY`,
+`VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_PROJECT_ID`,
+`VITE_FIREBASE_STORAGE_BUCKET`, `VITE_FIREBASE_MESSAGING_SENDER_ID`, and
+`VITE_FIREBASE_APP_ID`. `VITE_FIREBASE_MEASUREMENT_ID` is optional. Enable the
+Email/Password and Google providers in Firebase Authentication.
+
+Create a GitHub OAuth App and set its callback URL to
+`https://YOUR_APP_ORIGIN/api/auth/callback`. For local development this is
+usually `http://localhost:8443/api/auth/callback`. Configure its credentials as
+server-only `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` environment values.
+
+The GitHub access token is stored only in an HTTP-only, same-site server
+session. Repository API and source requests pass through the authenticated
+server proxy, preventing anonymous GitHub rate-limit exhaustion and enabling
+authorized private repository access.
+
+Groq explanations additionally require the server-only `GROQ_API_KEY`.
