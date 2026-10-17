@@ -1,0 +1,10 @@
+{
+  "description": "AI-powered platform guiding developers to understand codebases, investigate issues, generate tests, and verify changes for seamless open-source contributions.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
