@@ -416,6 +416,100 @@ function Landing({ go }: { go: (s: Screen) => void }) {
   )
 }
 
+function Auth({ go }: { go: (s: Screen) => void }) {
+  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const showAuthError = (reason: unknown) => {
+    const code = typeof reason === "object" && reason !== null && "code" in reason
+      ? String(reason.code)
+      : "";
+    const messages: Record<string, string> = {
+      "auth/invalid-credential": "That email and password combination was not recognized.",
+      "auth/email-already-in-use": "An account already exists for this email. Sign in instead.",
+      "auth/weak-password": "Choose a password with at least 6 characters.",
+      "auth/invalid-email": "Enter a valid email address.",
+      "auth/popup-closed-by-user": "The provider sign-in window was closed before it finished.",
+      "auth/popup-blocked": "Your browser blocked the sign-in window. Allow popups and try again.",
+      "auth/operation-not-allowed": "This sign-in method is not enabled in the Firebase Console.",
+    };
+    setError(messages[code] ?? "We couldn't complete sign-in. Check your details and try again.");
+  };
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!auth) return;
+    setBusy(true);
+    setError("");
+    try {
+      if (mode === "signup") {
+        const credential = await createUserWithEmailAndPassword(auth, email, password);
+        if (name.trim()) await updateProfile(credential.user, { displayName: name.trim() });
+      } else {
+        await signInWithEmailAndPassword(auth, email, password);
+      }
+    } catch (reason) {
+      showAuthError(reason);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const signInWithGoogle = async () => {
+    if (!auth) return;
+    setBusy(true);
+    setError("");
+    try {
+      await signInWithPopup(auth, new GoogleAuthProvider());
+    } catch (reason) {
+      showAuthError(reason);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const signInWithGitHub = async () => {
+    if (!auth) return;
+    setBusy(true);
+    setError("");
+    try {
+      await signInWithPopup(auth, new GithubAuthProvider());
+    } catch (reason) {
+      showAuthError(reason);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return <div className="auth-page">
+    <header><Logo onClick={() => go("landing")} /><button onClick={() => go("landing")}>Back to DevPilot</button></header>
+    <main>
+      <div className="auth-heading"><Badge tone="purple">YOUR DEVPILOT WORKSPACE</Badge><h1>{mode === "signup" ? "Create your account" : "Welcome back"}</h1><p>{mode === "signup" ? "Create an account to start exploring repositories." : "Sign in to continue to your workspace."}</p></div>
+      <section className="auth-card">
+        <div className="auth-providers">
+          <button className="provider-auth" onClick={signInWithGoogle} disabled={busy || !firebaseConfigured}><span className="google-mark">G</span>Continue with Google</button>
+          <button className="provider-auth" onClick={signInWithGitHub} disabled={busy || !firebaseConfigured}><Icon name="github" size={17}/>Continue with GitHub</button>
+        </div>
+        <div className="auth-divider"><span>or continue with email</span></div>
+        <form className="auth-form" onSubmit={submit}>
+          {mode === "signup" && <label>Name<input autoComplete="name" value={name} onChange={event => setName(event.target.value)} required /></label>}
+          <label>Email address<input type="email" autoComplete="email" value={email} onChange={event => setEmail(event.target.value)} required /></label>
+          <label>Password<input type="password" autoComplete={mode === "signup" ? "new-password" : "current-password"} minLength={6} value={password} onChange={event => setPassword(event.target.value)} required /></label>
+          {error && <p className="auth-error" role="alert">{error}</p>}
+          {!firebaseConfigured && <p className="auth-config-note">Firebase isn't configured yet. Add the web app values from your Firebase project to `.env.local`, then restart the dev server.</p>}
+          <button className="button primary auth-submit" type="submit" disabled={busy || !firebaseConfigured}>{busy ? "Please wait…" : mode === "signup" ? "Create account" : "Sign in"}</button>
+        </form>
+        <p className="auth-switch">{mode === "signup" ? "Already have an account?" : "New to DevPilot?"} <button onClick={() => { setMode(mode === "signup" ? "signin" : "signup"); setError(""); }}>{mode === "signup" ? "Sign in" : "Create an account"}</button></p>
+      </section>
+      <button className="auth-back" onClick={() => go("landing")}>Return to the homepage</button>
+    </main>
+  </div>;
+}
+
 const navItems: [Screen, IconName, string][] = [
   ["dashboard", "dashboard", "Overview"],
   ["dashboard", "repo", "My Repositories"],
